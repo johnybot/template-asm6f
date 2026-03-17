@@ -1,0 +1,570 @@
+	                              .include "constants.asm"
+	                            MIRRORING_HORIZONTAL            = %00000000
+	                            MIRRORING_VERTICAL              = %00000001
+	                            MIRRORING_FOUR_SCREEN           = %00001000
+	                            
+	                            ; ==============================
+	                            ; MARK: Sprites
+	                            ; ==============================
+	                            SPRITE_YPOS                     = $0
+	                            SPRITE_TILE                     = $1
+	                            SPRITE_ATTR                     = $2
+	                            SPRITE_XPOS                     = $3
+	                            SPRITE_SIZE                     = 4
+	                            
+	                            ; ==============================
+	                            ; MARK: Work RAM
+	                            ; ==============================
+	                            ZERO_PAGE                       = $0000
+	                            STACK                           = $0100 
+	                            SPRITE_BUFFER                   = $0200 
+	                            WORK_RAM_3                      = $0300
+	                            WORK_RAM_4                      = $0400
+	                            WORK_RAM_5                      = $0500
+	                            WORK_RAM_6                      = $0600
+	                            WORK_RAM_7                      = $0700
+	                            
+	                            ; ==============================
+	                            ; MARK: PPU Registers
+	                            ; ==============================
+	                            PPU_CONTROL                     = $2000
+	                            PPU_MASK                        = $2001
+	                            PPU_STATUS                      = $2002
+	                            SPR_ADDR                        = $2003
+	                            SPR_IO                          = $2004
+	                            PPU_SCROLL                      = $2005
+	                            PPU_ADDRESS                     = $2006
+	                            PPU_DATA                        = $2007
+	                            
+	                            ; ==============================
+	                            ; MARK: APU Registers
+	                            ; ==============================
+	                            SND_PULSE1_CTRL                 = $4000
+	                            SND_PULSE1_RAMP_CTRL            = $4001
+	                            SND_PULSE1_FT                   = $4002
+	                            SND_PULSE1_CT                   = $4003
+	                            SND_PULSE2_CTRL                 = $4004
+	                            SND_PULSE2_RAMP_CTRL            = $4005
+	                            SND_PULSE2_FT                   = $4006
+	                            SND_PULSE2_CT                   = $4007
+	                            SND_TRI_CTRL1                   = $4008
+	                            SND_TRI_CTRL2                   = $4009
+	                            SND_TRI_FREQ1                   = $400A
+	                            SND_TRI_FREQ2                   = $400B
+	                            SND_NOISE_CTRL1                 = $400C
+	                            SND_NOISE_CTRL2                 = $400D
+	                            SND_NOISE_FREQ1                 = $400E
+	                            SND_NOISE_FREQ2                 = $400F
+	                            SND_DMC_CTRL                    = $4010
+	                            SND_DMC_DA                      = $4011
+	                            SND_DMC_ADDR                    = $4012
+	                            SND_DMC_DL                      = $4013
+	                            SPRITE_DMA_TRANSFER             = $4014
+	                            SND_CLOCK                       = $4015
+	                            SND_FRAME_COUNTER               = $4017
+	                            
+	                            ; ==============================
+	                            ; MARK: Controllers
+	                            ; ==============================
+	                            JOYPAD_POLL                     = $4016
+	                            JOYPAD_1                        = $4016
+	                            JOYPAD_2                        = $4017
+	                            
+	                            BUTTON_RIGHT                    = %00000001
+	                            BUTTON_LEFT                     = %00000010
+	                            BUTTON_DOWN                     = %00000100
+	                            BUTTON_UP                       = %00001000
+	                            BUTTON_START                    = %00010000
+	                            BUTTON_SELECT                   = %00100000
+	                            BUTTON_B                        = %01000000
+	                            BUTTON_A                        = %10000000
+	                            
+	                            ; ==============================
+	                            ; MARK: PPU RAM
+	                            ; ==============================
+	                            NAMETABLE_1                     = $2000
+	                            ATTRIBUTES_1                    = $23C0
+	                            NAMETABLE_2                     = $2400
+	                            ATTRIBUTES_2                    = $27C0
+	                            NAMETABLE_3                     = $2800
+	                            ATTRIBUTES_3                    = $2BC0
+	                            NAMETABLE_4                     = $2C00
+	                            ATTRIBUTES_4                    = $2FC0
+	                            
+	                            PALETTE_BG                      = $3F00
+	                            PALETTE_BG_1                    = $3F00
+	                            PALETTE_BG_2                    = $3F04
+	                            PALETTE_BG_3                    = $3F08
+	                            PALETTE_BG_4                    = $3F0C
+	                            
+	                            PALETTE_SPRITE                  = $3F10
+	                            PALETTE_SPRITE_1                = $3F10
+	                            PALETTE_SPRITE_2                = $3F14
+	                            PALETTE_SPRITE_3                = $3F18
+	                            PALETTE_SPRITE_4                = $3F1C	                              .include "macros.asm"
+	                              
+	                              .macro JumpAddress addr
+	                              .dw addr - 1
+	                              .endm
+	                            
+	                              .macro SetPPUAddress addr
+	                              LDA #>addr
+	                              STA PPU_ADDRESS               ; Write the high byte of VRAM
+	                              LDA #<addr
+	                              STA PPU_ADDRESS               ; Write the low byte of VRAM
+	                              .endm
+	                            
+	                              .macro SetPointer addr
+	                              LDA #<addr
+	                              STA tempPointer + 0
+	                              LDA #>addr
+	                              STA tempPointer + 1
+	                              .endm
+	                            
+	                              .macro MoveToState state
+	                              LDA #state
+	                              STA engineState
+	                              .endm
+	                            
+	                              .macro WritePPURLE source, destination
+	                              SetPPUAddress destination
+	                              SetPointer source
+	                              JSR WriteRLE
+	                              .endm
+	                              
+	                              .macro WritePPULoop source, destination, numberOfBytes
+	                              SetPPUAddress destination
+	                              LDX #$00
+	                            @loop
+	                              LDA source, x
+	                              STA PPU_DATA
+	                              INX
+	                              CPX #numberOfBytes
+	                              BCC @loop
+	                              .endm	                            
+	                            ; ==============================
+	                            ; MARK: HEADER
+	                            ; ==============================
+	                              .inesprg 2                    ; 2 16kb program banks
+	                              .ineschr 1                    ; 1 8kb character bank
+	                              .inesmap 0                    ; NROM
+	                              .inesmir MIRRORING_VERTICAL   ; Vertical VRAM mirroring
+	                            
+	                            ; ==============================
+	                            ; MARK: Variables
+	                            ; ==============================
+	                              .enum ZERO_PAGE
+00000                           temp                            .dsb 8
+00008                           tempPointer                     .dsb 2
+0000A                           
+0000A                           sleeping                        .dsb 1
+0000B                           frame                           .dsb 1
+0000C                           ppuMask                         .dsb 1
+0000D                           ppuControl                      .dsb 1
+0000E                           hScroll                         .dsb 1
+0000F                           vScroll                         .dsb 1
+00010                           oldButtons                      .dsb 2
+00012                           buttons                         .dsb 2
+00014                           pressedButtons                  .dsb 2
+00016                           
+00016                           engineState                     .dsb 1
+00017                           
+00017                           playerX                         .dsb 1
+00018                           playerY                         .dsb 1
+00019                             .ende
+	                            
+	                              .enum SPRITE_BUFFER
+00200                           playerSprite                    .dsb SPRITE_SIZE * 1
+00204                             .ende
+	                            
+	                              .enum WORK_RAM_3
+00300                           ; Work RAM variables go here
+00300                             .ende
+	                            
+	                            ; ==============================
+	                            ; MARK: Reset
+	                            ; ==============================
+	                              .base $8000
+08000                           ; https://www.nesdev.org/wiki/Init_code
+08000                           Reset:
+08000 78                          SEI                           ; Ignore IRQs
+08001 D8                          CLD                           ; Disable decimal mode
+08002 A2 40                       LDX #$40
+08004 8E 17 40                    STX SND_FRAME_COUNTER         ; Disable APU frame IRQ
+08007 A2 FF                       LDX #$FF
+08009 9A                          TXS                           ; Set stack pointer to $01FF
+0800A E8                          INX                           ; X = 0
+0800B 8E 00 20                    STX PPU_CONTROL               ; Disable NMI
+0800E 8E 01 20                    STX PPU_MASK                  ; Disable rendering
+08011 8E 10 40                    STX SND_DMC_CTRL              ; Disable DMC IRQs
+08014                           
+08014 2C 02 20                    BIT PPU_STATUS                ; Clear vblank flag
+08017                           @vblankWait1:
+08017 2C 02 20                    BIT PPU_STATUS
+0801A 10 FB                       BPL @vblankWait1              ; Wait until vblank flag is set
+0801C                           
+0801C                           ; Clear out Work RAM to known state (all 0s)
+0801C                           @clearMemory:
+0801C A9 00                       LDA #$00                      ; We want to zero out all our work RAM
+0801E 95 00                       STA ZERO_PAGE, x              ; Zero Page
+08020 9D 00 01                    STA STACK, x                  ; Stack
+08023 9D 00 03                    STA WORK_RAM_3 , x            ; Rest of Work RAM
+08026 9D 00 04                    STA WORK_RAM_4 , x
+08029 9D 00 05                    STA WORK_RAM_5 , x
+0802C 9D 00 06                    STA WORK_RAM_6 , x
+0802F 9D 00 07                    STA WORK_RAM_7 , x
+08032 A9 FF                       LDA #$FF                      ; Offscreen sprite data
+08034 9D 00 02                    STA SPRITE_BUFFER, x          ; Sprite OAM Buffer
+08037 E8                          INX
+08038 D0 E2                       BNE @clearMemory
+0803A                             
+0803A                           @vblankWait2:
+0803A 2C 02 20                    BIT PPU_STATUS
+0803D 10 FB                       BPL @vblankWait2              ; Wait until vblank flag is set
+0803F                           
+0803F                           ; ==============================
+0803F                           ; MARK: Init
+0803F                           ; ==============================
+0803F                           Init:
+0803F 20 75 81                    JSR LoadInitialPPUData
+08042                           
+08042 A9 7C                       LDA #$7C
+08044 85 17                       STA playerX
+08046 85 18                       STA playerY
+08048                           
+08048 A9 1E                       LDA #%00011110
+0804A 85 0C                       STA ppuMask
+0804C                           
+0804C A9 88                       LDA #%10001000                ; Enable NMI and allow the game to start
+0804E 85 0D                       STA ppuControl
+08050 8D 00 20                    STA PPU_CONTROL
+08053                           
+08053                           ; ==============================
+08053                           ; MARK: Main
+08053                           ; ==============================
+08053                           Main:
+08053 E6 0A                       INC sleeping
+08055                           WaitForNMI:
+08055 A5 0A                       LDA sleeping
+08057 D0 FC                       BNE WaitForNMI
+08059                           
+08059                           GameLogic:
+08059 20 0C 81                    JSR ReadControllers
+0805C                           
+0805C 20 9C 80                    JSR HandleGameState
+0805F                           
+0805F E6 0B                       INC frame
+08061 4C 53 80                    JMP Main                      ; Back to the wait loop
+08064                           
+08064                           ; ==============================
+08064                           ; MARK: NMI
+08064                           ; ==============================
+08064                           NMI:
+08064                           ; Save the registers to the stack to restore later
+08064 48                          PHA                           ; Save A to the stack
+08065 8A                          TXA                           ;
+08066 48                          PHA                           ; Save X to the stack
+08067 98                          TYA                           ;
+08068 48                          PHA                           ; Save y to the stack
+08069                           
+08069                           ; DMA transfer the sprites over
+08069 A9 00                       LDA #<SPRITE_BUFFER           ; Low byte of the sprite memory
+0806B 8D 03 20                    STA SPR_ADDR                  ; Write to Sprite Register
+0806E A9 02                       LDA #>SPRITE_BUFFER           ; High byte of the sprite memory
+08070 8D 14 40                    STA SPRITE_DMA_TRANSFER       ; Start the DMA transfer
+08073                           
+08073                           ; TODO: Update background here
+08073                           
+08073                           ; Clear out the PPU_ADDRESS
+08073 A9 00                       LDA #$00
+08075 8D 06 20                    STA PPU_ADDRESS
+08078 8D 06 20                    STA PPU_ADDRESS
+0807B                           
+0807B                           ; Set the PPU scroll
+0807B A5 0E                       LDA hScroll
+0807D 8D 05 20                    STA PPU_SCROLL                ; Reset Horizontal Scroll
+08080 A5 0F                       LDA vScroll
+08082 8D 05 20                    STA PPU_SCROLL                ; Reset Vertical Scroll
+08085                           
+08085                           ; Set the PPU control and mask
+08085 A5 0D                       LDA ppuControl                ; Set the PPU_CONTROL
+08087 8D 00 20                    STA PPU_CONTROL
+0808A A5 0C                       LDA ppuMask                   ; Set the PPU_MASK
+0808C 8D 01 20                    STA PPU_MASK
+0808F                           
+0808F C6 0A                       DEC sleeping                  ; Indicate that we're done with the NMI
+08091                           ; Restore the registers from the stack
+08091 68                          PLA                           ; Load y from the stack
+08092 A8                          TAY                           ;
+08093 68                          PLA                           ; Load x from the stack
+08094 AA                          TAX                           ;
+08095 68                          PLA                           ; Load A from the stack
+08096 40                          RTI                           ; Return from NMI
+08097                           
+08097                           ; ==============================
+08097                           ; MARK: IRQ
+08097                           ; ==============================
+08097                           IRQ:
+08097 40                          RTI
+08098                           
+08098                           ; ==============================
+08098                           ; MARK: CODE
+08098                           ; ==============================
+08098                             .include "engine.asm"
+08098                           STATE_TITLE                     = $00
+08098                           STATE_GAME                      = $01
+08098                           
+08098                           StateRoutines:
+08098                             JumpAddress StateTitle
+08098 A8 80                       .dw StateTitle
+ - 1
+0809A                             JumpAddress StateGame
+0809A BC 80                       .dw StateGame
+ - 1
+0809C                           HandleGameState:
+0809C A5 16                       LDA engineState
+0809E 0A                          ASL A
+0809F AA                          TAX
+080A0 BD 99 80                    LDA StateRoutines + 1, x
+080A3 48                          PHA
+080A4 BD 98 80                    LDA StateRoutines + 0, x
+080A7 48                          PHA
+080A8 60                          RTS
+080A9                           
+080A9                           StateTitle:
+080A9 20 F1 80                    JSR ClearPlayer
+080AC                           
+080AC                             ; Advance to game
+080AC A5 14                       LDA pressedButtons
+080AE 29 90                       AND #BUTTON_A | BUTTON_START
+080B0 F0 0A                       BEQ @notStart
+080B2                             MoveToState STATE_GAME
+080B2 A9 01                       LDA #STATE_GAME
+
+080B4 85 16                       STA engineState
+080B6 A5 0D                       LDA ppuControl
+080B8 49 01                       EOR #%00000001
+080BA 85 0D                       STA ppuControl
+080BC                           @notStart
+080BC 60                          RTS
+080BD                           
+080BD                           StateGame:
+080BD 20 F7 80                    JSR DrawPlayer
+080C0                           
+080C0                             ; Return to title
+080C0 A5 14                       LDA pressedButtons
+080C2 29 40                       AND #BUTTON_B
+080C4 F0 0A                       BEQ @notB
+080C6                             MoveToState STATE_TITLE
+080C6 A9 00                       LDA #STATE_TITLE
+
+080C8 85 16                       STA engineState
+080CA A5 0D                       LDA ppuControl
+080CC 49 01                       EOR #%00000001
+080CE 85 0D                       STA ppuControl
+080D0                           @notB
+080D0                           
+080D0                             ; Move character around
+080D0 A5 12                       LDA buttons
+080D2 29 08                       AND #BUTTON_UP
+080D4 F0 02                       BEQ @notUp
+080D6 C6 18                       DEC playerY
+080D8                           @notUp
+080D8 A5 12                       LDA buttons
+080DA 29 04                       AND #BUTTON_DOWN
+080DC F0 02                       BEQ @notDown
+080DE E6 18                       INC playerY
+080E0                           @notDown
+080E0 A5 12                       LDA buttons
+080E2 29 02                       AND #BUTTON_LEFT
+080E4 F0 02                       BEQ @notLeft
+080E6 C6 17                       DEC playerX
+080E8                           @notLeft
+080E8 A5 12                       LDA buttons
+080EA 29 01                       AND #BUTTON_RIGHT
+080EC F0 02                       BEQ @notRight
+080EE E6 17                       INC playerX
+080F0                           @notRight
+080F0 60                          RTS
+080F1                           
+080F1                           ClearPlayer:
+080F1 A9 FF                       LDA #$FF
+080F3 8D 00 02                    STA playerSprite + SPRITE_YPOS
+080F6 60                          RTS
+080F7                           
+080F7                           DrawPlayer:
+080F7 A5 17                       LDA playerX
+080F9 8D 03 02                    STA playerSprite + SPRITE_XPOS
+080FC A5 18                       LDA playerY
+080FE 8D 00 02                    STA playerSprite + SPRITE_YPOS
+08101 A9 00                       LDA #$00
+08103 8D 02 02                    STA playerSprite + SPRITE_ATTR
+08106 A9 00                       LDA #$00
+08108 8D 01 02                    STA playerSprite + SPRITE_TILE
+0810B 60                          RTS0810C                             .include "utils.asm"
+0810C                           ; https://www.nesdev.org/wiki/Controller_reading_code#Alternative_2_Controllers_Read
+0810C                           ReadControllers:
+0810C A5 12                       LDA buttons
+0810E 85 10                       STA oldButtons                ; Save the old buttons
+08110 A5 13                       LDA buttons + 1
+08112 85 11                       STA oldButtons + 1            ; Save the old buttons
+08114                           
+08114 A9 01                       LDA #$01
+08116 8D 16 40                    STA JOYPAD_1
+08119 85 13                       STA buttons + 1               ; player 2's buttons double as a ring counter
+0811B 4A                          LSR A                         ; now A is 0
+0811C 8D 16 40                    STA JOYPAD_1
+0811F                           @loop:
+0811F AD 16 40                    LDA JOYPAD_1
+08122 29 03                       AND #%00000011                ; ignore bits other than controller
+08124 C9 01                       CMP #$01                      ; Set carry if and only if nonzero
+08126 26 12                       ROL buttons + 0               ; Carry -> bit 0; bit 7 -> Carry
+08128 AD 17 40                    LDA JOYPAD_2                  ; Repeat for player 2
+0812B 29 03                       AND #%00000011
+0812D C9 01                       CMP #$01
+0812F 26 13                       ROL buttons + 1               ; Carry -> bit 0; bit 7 -> Carry
+08131 90 EC                       BCC @loop
+08133                           
+08133 A5 10                       LDA oldButtons
+08135 49 FF                       EOR #$FF
+08137 25 12                       AND buttons
+08139 85 14                       STA pressedButtons            ; P1 buttons that are newly pressed
+0813B A5 11                       LDA oldButtons + 1
+0813D 49 FF                       EOR #$FF
+0813F 25 13                       AND buttons + 1
+08141 85 15                       STA pressedButtons + 1        ; P2 buttons that are newly pressed
+08143 60                          RTS
+08144                           
+08144                           ; Based off RLE decompressor by Shiru 
+08144                           WriteRLE:
+08144 A0 00                       LDY #$00
+08146 20 6C 81                    JSR WriteRLEByte
+08149 85 00                       STA temp + 0
+0814B                           @1
+0814B 20 6C 81                    JSR WriteRLEByte
+0814E C5 00                       CMP temp + 0
+08150 F0 07                       BEQ @2
+08152 8D 07 20                    STA PPU_DATA
+08155 85 01                       STA temp + 1
+08157 D0 F2                       BNE @1
+08159                           @2
+08159 20 6C 81                    JSR WriteRLEByte
+0815C C9 00                       CMP #$00
+0815E F0 0B                       BEQ @done
+08160 AA                          TAX
+08161 A5 01                       LDA temp + 1
+08163                           @3
+08163 8D 07 20                    STA PPU_DATA
+08166 CA                          DEX
+08167 D0 FA                       BNE @3
+08169 F0 E0                       BEQ @1
+0816B                           @done
+0816B 60                          RTS
+0816C                           
+0816C                           WriteRLEByte
+0816C B1 08                       LDA (tempPointer), y
+0816E E6 08                       INC tempPointer + 0
+08170 D0 02                       BNE @done
+08172 E6 09                       INC tempPointer + 1
+08174                           @done
+08174 60                          RTS
+08175                           
+08175                           LoadInitialPPUData:
+08175                             WritePPURLE TitleBackground, NAMETABLE_1
+08175                             SetPPUAddress NAMETABLE_1
+
+08175 A9 20                       LDA #>NAMETABLE_1
+
+
+08177 8D 06 20                    STA PPU_ADDRESS               ; Write the high byte of VRAM
+0817A A9 00                       LDA #<NAMETABLE_1
+
+
+0817C 8D 06 20                    STA PPU_ADDRESS               ; Write the low byte of VRAM
+0817F                             SetPointer TitleBackground
+0817F A9 00                       LDA #<TitleBackground
+
+08181 85 08                       STA tempPointer + 0
+08183 A9 E0                       LDA #>TitleBackground
+
+08185 85 09                       STA tempPointer + 1
+08187 20 44 81                    JSR WriteRLE
+0818A                             WritePPURLE GameBackground, NAMETABLE_2
+0818A                             SetPPUAddress NAMETABLE_2
+
+0818A A9 24                       LDA #>NAMETABLE_2
+
+
+0818C 8D 06 20                    STA PPU_ADDRESS               ; Write the high byte of VRAM
+0818F A9 00                       LDA #<NAMETABLE_2
+
+
+08191 8D 06 20                    STA PPU_ADDRESS               ; Write the low byte of VRAM
+08194                             SetPointer GameBackground
+08194 A9 25                       LDA #<GameBackground
+
+08196 85 08                       STA tempPointer + 0
+08198 A9 E0                       LDA #>GameBackground
+
+0819A 85 09                       STA tempPointer + 1
+0819C 20 44 81                    JSR WriteRLE
+0819F                           
+0819F                             WritePPULoop PaletteBackground, PALETTE_BG, 16
+0819F                             SetPPUAddress PALETTE_BG
+0819F A9 3F                       LDA #>PALETTE_BG
+
+081A1 8D 06 20                    STA PPU_ADDRESS               ; Write the high byte of VRAM
+081A4 A9 00                       LDA #<PALETTE_BG
+
+081A6 8D 06 20                    STA PPU_ADDRESS               ; Write the low byte of VRAM
+081A9 A2 00                       LDX #$00
+081AB                           @loop
+081AB BD 43 E0                    LDA PaletteBackground, x
+081AE 8D 07 20                    STA PPU_DATA
+081B1 E8                          INX
+081B2 E0 10                       CPX #16
+
+081B4 90 F5                       BCC @loop
+081B6                             WritePPULoop PaletteSprites, PALETTE_SPRITE, 16
+081B6                             SetPPUAddress PALETTE_SPRITE
+081B6 A9 3F                       LDA #>PALETTE_SPRITE
+
+081B8 8D 06 20                    STA PPU_ADDRESS               ; Write the high byte of VRAM
+081BB A9 10                       LDA #<PALETTE_SPRITE
+
+081BD 8D 06 20                    STA PPU_ADDRESS               ; Write the low byte of VRAM
+081C0 A2 00                       LDX #$00
+081C2                           @loop
+081C2 BD 53 E0                    LDA PaletteSprites, x
+081C5 8D 07 20                    STA PPU_DATA
+081C8 E8                          INX
+081C9 E0 10                       CPX #16
+
+081CB 90 F5                       BCC @loop
+081CD 60                          RTS
+081CE                           
+081CE                           ; ==============================
+081CE                           ; MARK: DATA
+081CE                           ; ==============================
+081CE 00 00 00 00 00 00 00 00..   .org $E000
+0E000                           TitleBackground:
+0E000 01 00 01 E9 44 59 64 5C..   .incbin "title.nrle"
+0E025                           GameBackground:
+0E025 01 00 01 FE 00 01 8A 38..   .incbin "game.nrle"
+0E043                           PaletteBackground:
+0E043 0F 00 10 30 0F 0C 21 32..   .incbin "bg.pal"
+0E053                           PaletteSprites:
+0E053 0F 00 10 30 0F 0C 21 32..   .incbin "sprites.pal"
+0E063                           
+0E063                           ; ==============================
+0E063                           ; MARK: Vectors
+0E063                           ; ==============================
+0E063 00 00 00 00 00 00 00 00..   .org $FFFA
+0FFFA 64 80                       .dw NMI
+0FFFC 00 80                       .dw Reset
+0FFFE 97 80                       .dw IRQ
+10000                           
+10000                           ; ==============================
+10000                           ; MARK: CHR
+10000                           ; ==============================
+10000 00 00 00 00 00 00 00 00..   .incbin "tiles.chr"

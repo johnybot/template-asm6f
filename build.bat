@@ -1,0 +1,1 @@
+.\asm6f\asm6f_64.exe -Lm game.asm game.nes
